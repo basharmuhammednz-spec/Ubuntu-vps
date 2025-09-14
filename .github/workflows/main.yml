@@ -1,0 +1,90 @@
+
+name: ubuntu + Xfce + Tailscale
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup-gui-runner:
+    runs-on: self-hosted               # جهاز Ubuntu الذي عليه الـ runner
+    timeout-minutes: 360               # عدّلها حسب حاجتك
+    env:
+      USERNAME: runner                 # عدّل لاسم المستخدم الفعلي إن رغبت
+      PASSWORD: ${{ secrets.RDP_PASSWORD }}              # خزّنها في Secrets
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}# يُفضّل Ephemeral & Preauthorized
+      TAILSCALE_HOSTNAME: gh-xfce-${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure user exists and sudo (NOPASSWD)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # أنشئ المستخدم إن لم يكن موجودًا
+          if ! id -u "${USERNAME}" >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash "${USERNAME}"
+          fi
+          # اضبط كلمة المرور من Secrets (لا تطبعها في السجلات)
+          echo "${USERNAME}:${PASSWORD}" | sudo chpasswd
+          # امنح صلاحيات sudo (بدون كلمة مرور إذا كنت تحتاج ذلك لهذا الـ job)
+          echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/${USERNAME} >/dev/null
+          sudo chmod 0440 /etc/sudoers.d/${USERNAME}
+
+      - name: Install Xfce + xrdp (Ubuntu)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo ">>> Installing Xfce Desktop..."
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            xfce4 xfce4-goodies xorg dbus-x11 xrdp xorgxrdp
+          # السماح لـ xrdp باستخدام شهادات ssl الافتراضية
+          sudo adduser xrdp ssl-cert || true
+
+          # إعداد جلسة Xfce للمستخدم المستهدف
+          sudo -u "${USERNAME}" bash -c 'echo "startxfce4" > ~/.xsession'
+          sudo -u "${USERNAME}" bash -c 'echo "exec startxfce4" > ~/.xinitrc'
+
+          # (اختياري) تحسين الأداء عبر تعطيل المؤثرات
+          sudo -u "${USERNAME}" xfconf-query -c xfwm4 -p /general/use_compositing -s false || true
+
+          # تفعيل وإعادة تشغيل xrdp
+          sudo systemctl enable --now xrdp
+          sudo systemctl restart xrdp
+          sudo systemctl --no-pager status xrdp || true
+
+          # (اختياري) إذا كان UFW مفعلاً، اسمح بـ RDP عبر واجهة Tailscale فقط
+          if command -v ufw >/dev/null 2>&1; then
+            if sudo ufw status | grep -q "Status: active"; then
+              sudo ufw allow in on tailscale0 to any port 3389 proto tcp || true
+            fi
+          fi
+
+      - name: Connect to Tailscale (official action)
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          hostname: ${{ env.TAILSCALE_HOSTNAME }}
+          # args: --accept-dns=true --ssh=false
+
+      - name: Show Tailscale IPs
+        shell: bash
+        run: |
+          echo "=== FINAL CONNECTION INFO ==="
+          echo "Tailscale IPv4:"
+          tailscale ip -4 || true
+          echo "Tailscale IPv6:"
+          tailscale ip -6 || true
+          echo "Connect your RDP client to one of the IPs above on port 3389."
+          echo "Username: ${USERNAME}"
+          # كلمة المرور لا تُطبع حفاظًا على الأمان
+
+      - name: Keep alive for RDP session
+        shell: bash
+        run: |
+          echo ">>> Keeping runner alive (until job timeout). Connect via RDP now."
+          while true; do sleep 600; don
